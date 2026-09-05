@@ -105,6 +105,44 @@ poetry run mypy                     # статическая типизация
 Код в `ember_agent/`, тесты — в `tests/`. Формат конфигурации описан в
 [`config.example.toml`](config.example.toml).
 
+## Релиз
+
+Публикация новой версии на PyPI автоматизирована через GitHub Actions
+(workflow `.github/workflows/publish.yml`):
+
+1. Поднимите версию в `pyproject.toml` (`version = "0.1.0"`) и закоммитьте
+   изменение, например: `chore: bump version to 0.1.0`.
+2. Создайте и запушьте git-тег, совпадающий с версией:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+3. Workflow соберёт wheel и sdist (`poetry build`) и опубликует их на PyPI.
+   Ветка `main` при этом не нужна — достаточно тега.
+
+Публикация использует Trusted Publishing (OIDC): секреты в GitHub не хранятся.
+Для этого владельцу нужно один раз настроить publisher на PyPI
+(и, опционально, на TestPyPI для проверок):
+
+- **PyPI:** https://pypi.org/manage/account/publishing/
+- **TestPyPI:** https://test.pypi.org/manage/account/publishing/
+
+Поля формы одинаковы для PyPI и TestPyPI:
+
+| Поле | Значение |
+|---|---|
+| Project name | `emberio-labs-ember-agent` |
+| GitHub owner | `emberio-labs` |
+| GitHub repository | `ember-agent` |
+| Workflow name | `publish.yml` |
+| Environment | *(пусто)* |
+
+После настройки публикацию можно проверить вручную на TestPyPI:
+GitHub → Actions → Publish → Run workflow. На боевой PyPI пакет уходит
+только по git-тегу `v*`.
+
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE).
