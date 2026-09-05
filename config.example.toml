@@ -1,0 +1,33 @@
+# Пример конфигурации ember-agent.
+# Скопируйте в config.toml и запустите: ember-agent run
+#
+# Все секции опциональны — пустой файл создаст агента на MockProvider.
+
+[agent]
+# Системный промпт: как агент себя ведёт.
+system_prompt = "Ты полезный и краткий помощник."
+# Модель по умолчанию. Для реального провайдера укажите свою,
+# например "gpt-4o-mini" (OpenAI) или "llama-3.1-8b-instant" (Groq и др.).
+# model = "gpt-4o-mini"
+
+[provider]
+# Тип провайдера:
+#   "mock"   — работает без сети и ключей (по умолчанию, для экспериментов)
+#   "openai" — OpenAI и любые OpenAI-совместимые API (OpenRouter, Groq, vLLM, LM Studio...)
+type = "mock"
+# Переменная окружения, из которой берётся API-ключ (для type = "openai").
+api_key_env = "OPENAI_API_KEY"
+# Полный base_url до /v1-совместимого API (для type = "openai", опционально).
+# По умолчанию — https://api.openai.com/v1
+# base_url = "https://api.groq.com/openai/v1"
+
+# Внешние инструменты по MCP (Model Context Protocol). Опционально.
+# [[mcp.servers]]
+# transport = "stdio"            # дочерний процесс: "python", "npx" и т.п.
+# command = "python"
+# args = ["path/to/server.py"]
+#
+# [[mcp.servers]]
+# transport = "http"             # streamable HTTP-сервер
+# url = "http://127.0.0.1:8000/mcp"
+# headers = { Authorization = "Bearer YOUR_TOKEN" }
