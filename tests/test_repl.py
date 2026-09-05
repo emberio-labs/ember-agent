@@ -8,7 +8,14 @@ from typing import Any
 import pytest
 from ember import Agent, FunctionTool, MockProvider
 from ember_agent.config import AgentConfig
-from ember_agent.repl import HELP_TEXT, _session, format_greeting, run_repl
+from ember_agent.repl import (
+    AGENT_LABEL,
+    HELP_TEXT,
+    USER_PROMPT,
+    _session,
+    format_greeting,
+    run_repl,
+)
 from rich.console import Console
 
 
@@ -59,7 +66,6 @@ def test_format_greeting_contains_context() -> None:
         provider="MockProvider",
         model="mock-1",
         tool_names=["read_file", "echo"],
-        version="0.1.0",
     )
 
     assert "MockProvider" in text
@@ -69,7 +75,7 @@ def test_format_greeting_contains_context() -> None:
 
 
 def test_format_greeting_without_model_and_tools() -> None:
-    text = format_greeting(provider="MockProvider", model=None, tool_names=[], version="0.1.0")
+    text = format_greeting(provider="MockProvider", model=None, tool_names=[])
 
     assert "инструменты: нет" in text
     assert "модель:" not in text
@@ -101,12 +107,30 @@ def test_session_ends_on_eof(capsys: pytest.CaptureFixture[str]) -> None:
     assert code == 0
 
 
+def test_session_prints_greeting_banner(capsys: pytest.CaptureFixture[str]) -> None:
+    code = _session(_mock_agent(), Console(), _make_input("exit"))
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "ember-agent" in captured.out
+    assert "MockProvider" in captured.out
+    assert "/help" in captured.out
+
+
 def test_session_print_answer_from_mock(capsys: pytest.CaptureFixture[str]) -> None:
     code = _session(_mock_agent(), Console(), _make_input("привет", "exit"))
 
     captured = capsys.readouterr()
     assert code == 0
     assert "Привет! Я мок-провайдер." in captured.out
+
+
+def test_session_marks_agent_reply_with_label(capsys: pytest.CaptureFixture[str]) -> None:
+    code = _session(_mock_agent(), Console(), _make_input("привет", "exit"))
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert AGENT_LABEL in captured.out
 
 
 def test_session_help_and_reset(capsys: pytest.CaptureFixture[str]) -> None:
@@ -177,6 +201,10 @@ def test_session_with_tools_prints_thinking_and_answer(capsys: pytest.CaptureFix
     assert code == 0
     assert "думаю…" in captured.out
     assert "Готово!" in captured.out
+
+
+def test_user_prompt_is_not_a_bare_lowercase_you() -> None:
+    assert "вы:" not in USER_PROMPT.lower().replace(" ", "")
 
 
 # --- run_repl (агент из конфигурации) -----------------------------------

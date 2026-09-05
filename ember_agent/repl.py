@@ -3,7 +3,8 @@
 Собирает в одном месте UX диалога с агентом, который раньше был
 «минимальным каркасом» в ``cli.py``:
 
-- приветствие с контекстом (провайдер, модель, инструменты);
+- баннер приветствия (rich-панель): версия, провайдер, модель, инструменты;
+- диалог в виде чата: ответы агента с подписью, приглашение «Ваш ответ»;
 - команды сессии ``/help``, ``/reset`` (сброс через ``Agent.reset()``);
 - markdown-рендер ответов (rich) с потоковой печатью там, где нет тулов;
 - показ процесса вызова инструментов (колбэки ``factory.build_agent``);
@@ -19,6 +20,7 @@ from typing import Any, Protocol
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.text import Text
 
 from ember_agent import __version__
@@ -27,6 +29,12 @@ from ember_agent.factory import ToolCallHook, ToolResultHook, build_agent
 
 #: Команды выхода из диалога (регистронезависимо).
 QUIT_COMMANDS = frozenset({"exit", "quit", "выход"})
+
+#: Подпись ответов агента в ленте диалога.
+AGENT_LABEL = "🤖 ember-agent"
+
+#: Приглашение ввода пользователя (rich-markup для ``Console.input``).
+USER_PROMPT = "\n[bold cyan]Ваш ответ:[/bold cyan] "
 
 HELP_TEXT = """\
 Команды сессии:
@@ -57,23 +65,21 @@ def format_greeting(
     provider: str,
     model: str | None,
     tool_names: Sequence[str],
-    version: str,
 ) -> str:
-    """Собрать текст приветствия интерактивной сессии."""
-    details = [f"провайдер: {provider}"]
+    """Собрать текст баннера приветствия (тело rich-панели).
+
+    Заголовок панели с версией добавляется при печати в ``_session`` —
+    здесь только контекст сессии и подсказка.
+    """
+    lines = [f"🔌 провайдер: {provider}"]
     if model:
-        details.append(f"модель: {model}")
+        lines.append(f"🧠 модель: {model}")
     if tool_names:
-        details.append(f"инструменты ({len(tool_names)}): {', '.join(tool_names)}")
+        lines.append(f"🧰 инструменты ({len(tool_names)}): {', '.join(tool_names)}")
     else:
-        details.append("инструменты: нет")
-    return "\n".join(
-        [
-            f"⚡ ember-agent {version}",
-            " · ".join(details),
-            "Введите сообщение или наберите /help.",
-        ]
-    )
+        lines.append("🧰 инструменты: нет")
+    lines.extend(["", "💬 Введите сообщение или наберите /help."])
+    return "\n".join(lines)
 
 
 def _agent_context(agent: ReplAgent) -> tuple[str, str | None, list[str]]:
@@ -146,6 +152,7 @@ def _stream_answer(agent: ReplAgent, user_input: str, console: Console) -> None:
 
 def _print_answer(agent: ReplAgent, user_input: str, console: Console) -> None:
     """Получить и напечатать ответ агента на сообщение пользователя."""
+    console.print(Text(AGENT_LABEL, style="bold cyan"))
     if agent.tools:
         # С тулами stream_run() в ember не работает: показываем «думаю…»
         # и живые вызовы инструментов (их печатают колбэки build_agent).
@@ -155,6 +162,25 @@ def _print_answer(agent: ReplAgent, user_input: str, console: Console) -> None:
         _stream_answer(agent, user_input, console)
 
 
+def _print_greeting(
+    console: Console,
+    *,
+    provider: str,
+    model: str | None,
+    tool_names: Sequence[str],
+) -> None:
+    """Напечатать баннер приветствия: rich-панель с версией и контекстом."""
+    body = format_greeting(provider=provider, model=model, tool_names=tool_names)
+    console.print(
+        Panel(
+            body,
+            title=f"⚡ ember-agent {__version__}",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
+
 def _session(
     agent: ReplAgent,
     console: Console,
@@ -162,18 +188,12 @@ def _session(
 ) -> int:
     """Цикл диалога: ввод строк, команды, ответы агента. Код выхода 0."""
     provider, model, tool_names = _agent_context(agent)
-    greeting = format_greeting(
-        provider=provider,
-        model=model,
-        tool_names=tool_names,
-        version=__version__,
-    )
-    console.print(Text(greeting))
+    _print_greeting(console, provider=provider, model=model, tool_names=tool_names)
 
     interrupted = False
     while True:
         try:
-            line = input_fn("\nвы: ").strip()
+            line = input_fn(USER_PROMPT).strip()
         except EOFError:
             console.print()
             return 0
@@ -224,7 +244,8 @@ def run_repl(
     Args:
         config: Конфигурация агента.
         console: Консоль rich (по умолчанию создаётся новая).
-        input_fn: Функция чтения строки с приглашением (для тестов).
+        input_fn: Функция чтения строки с приглашением (для тестов);
+            по умолчанию — ``console.input`` (rich-markup приглашения).
     """
     console = console or Console()
     on_tool_call, on_tool_result = _tool_hooks(console)
@@ -233,4 +254,4 @@ def run_repl(
         on_tool_call=on_tool_call,
         on_tool_result=on_tool_result,
     ) as agent:
-        return _session(agent, console, input_fn or input)
+        return _session(agent, console, input_fn or console.input)
