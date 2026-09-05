@@ -13,6 +13,7 @@ from ember_agent.repl import (
     HELP_TEXT,
     USER_PROMPT,
     _session,
+    _ToolFeed,
     format_greeting,
     run_repl,
 )
@@ -205,6 +206,75 @@ def test_session_with_tools_prints_thinking_and_answer(capsys: pytest.CaptureFix
 
 def test_user_prompt_is_not_a_bare_lowercase_you() -> None:
     assert "вы:" not in USER_PROMPT.lower().replace(" ", "")
+
+
+# --- лог вызовов инструментов (_ToolFeed) -------------------------------
+
+
+def test_tool_feed_prints_call_and_result(capsys: pytest.CaptureFixture[str]) -> None:
+    feed = _ToolFeed(Console())
+
+    feed.on_tool_call("read_file", {"path": "config.toml", "lines": 40})
+    feed.on_tool_result("read_file", "🔌 провайдер: mock")
+
+    feed.print_pending()
+
+    captured = capsys.readouterr()
+    assert "🔧 read_file" in captured.out
+    assert 'path="config.toml"' in captured.out
+    assert "lines=40" in captured.out
+    assert "✔ read_file" in captured.out
+    assert "🔌 провайдер: mock" in captured.out
+    assert feed.last_kind == "result"
+    assert feed.last_name == "read_file"
+
+
+def test_tool_feed_prints_error_in_red(capsys: pytest.CaptureFixture[str]) -> None:
+    feed = _ToolFeed(Console())
+
+    feed.on_tool_result("read_file", RuntimeError("нет файла"))
+    feed.print_pending()
+
+    captured = capsys.readouterr()
+    assert "✖ read_file" in captured.out
+    assert "нет файла" in captured.out
+
+
+def test_tool_feed_clips_long_arguments(capsys: pytest.CaptureFixture[str]) -> None:
+    feed = _ToolFeed(Console())
+    long_text = "а" * 300
+
+    feed.on_tool_call("write_file", {"path": "note.txt", "content": long_text})
+    feed.print_pending()
+
+    captured = capsys.readouterr()
+    assert "…" in captured.out
+    assert long_text not in captured.out
+
+
+def test_tool_feed_empty_after_drain(capsys: pytest.CaptureFixture[str]) -> None:
+    feed = _ToolFeed(Console())
+    assert feed.empty
+
+    feed.on_tool_call("echo", {"text": "привет"})
+    assert not feed.empty
+
+    feed.print_pending()
+    assert feed.empty
+
+
+def test_tool_feed_close_discards_events(capsys: pytest.CaptureFixture[str]) -> None:
+    feed = _ToolFeed(Console())
+
+    feed.on_tool_call("echo", {"text": "привет"})
+    feed.close()
+    assert feed.empty
+
+    feed.on_tool_call("echo", {"text": "после закрытия"})
+    feed.print_pending()
+
+    captured = capsys.readouterr()
+    assert "echo" not in captured.out
 
 
 # --- run_repl (агент из конфигурации) -----------------------------------

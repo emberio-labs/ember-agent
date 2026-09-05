@@ -7,14 +7,18 @@
 - диалог в виде чата: ответы агента с подписью, приглашение «Ваш ответ»;
 - команды сессии ``/help``, ``/reset`` (сброс через ``Agent.reset()``);
 - markdown-рендер ответов (rich) с потоковой печатью там, где нет тулов;
-- показ процесса вызова инструментов (колбэки ``factory.build_agent``);
+- анимированный индикатор «думаю…» (rich ``Status``) на время ответа агента;
+- цветной лог вызовов инструментов: имя тула, аргументы и результат;
 - Ctrl+C отменяет текущий ввод/ответ, а не завершает процесс.
 """
 
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
+from queue import Empty, Queue
 from typing import Any, Protocol
 
 from rich.console import Console
@@ -25,7 +29,7 @@ from rich.text import Text
 
 from ember_agent import __version__
 from ember_agent.config import AgentConfig
-from ember_agent.factory import ToolCallHook, ToolResultHook, build_agent
+from ember_agent.factory import build_agent
 
 #: Команды выхода из диалога (регистронезависимо).
 QUIT_COMMANDS = frozenset({"exit", "quit", "выход"})
@@ -47,6 +51,15 @@ HELP_TEXT = """\
 #: Предел длины аргументов/результата тула в логе процесса.
 _PREVIEW_LIMIT = 100
 
+#: Предел длины одного значения аргумента в логе вызова.
+_VALUE_LIMIT = 60
+
+#: Как часто главный поток опрашивает очередь событий инструментов.
+_SPINNER_POLL_SECONDS = 0.05
+
+#: Текст анимированного индикатора (рисуется rich ``Status``).
+_THINKING_TEXT = "💭 думаю…"
+
 
 class ReplAgent(Protocol):
     """Агент в терминах REPL: что нужно диалогу от объекта ``Agent``."""
@@ -58,6 +71,10 @@ class ReplAgent(Protocol):
     def run(self, user_input: str) -> str: ...
     def stream_run(self, user_input: str) -> Iterator[str]: ...
     def reset(self) -> None: ...
+
+
+#: Событие лога инструмента: вид ("call"/"result"), имя тула, данные события.
+ToolEvent = tuple[str, str, Any]
 
 
 def format_greeting(
@@ -90,16 +107,6 @@ def _agent_context(agent: ReplAgent) -> tuple[str, str | None, list[str]]:
     return provider_name, model, names
 
 
-def _compact_arguments(arguments: dict[str, Any]) -> str:
-    """Аргументы тула одной строкой (усечённой) для лога процесса."""
-    if not arguments:
-        return ""
-    text = json.dumps(arguments, ensure_ascii=False, default=str)
-    if len(text) > _PREVIEW_LIMIT:
-        return text[: _PREVIEW_LIMIT - 1] + "…"
-    return text
-
-
 def _preview_result(text: str) -> str:
     """Усечь многострочный результат тула до одной читаемой строки."""
     one_line = " ".join(text.split())
@@ -108,28 +115,125 @@ def _preview_result(text: str) -> str:
     return one_line[: _PREVIEW_LIMIT - 1] + "…"
 
 
-def _tool_hooks(console: Console) -> tuple[ToolCallHook, ToolResultHook]:
-    """Колбэки для ``build_agent``: печатают процесс вызова тулов в консоль."""
+def _clip(text: Text, limit: int) -> Text:
+    """Обрезать rich-``Text`` до ``limit`` символов, сохранив стили кусков."""
+    if len(text) <= limit:
+        return text
+    clipped = Text()
+    clipped.append_text(text[: limit - 1])
+    clipped.append("…", style="dim")
+    return clipped
 
-    def on_tool_call(name: str, arguments: dict[str, Any]) -> None:
-        args = _compact_arguments(arguments)
-        label = f"🔧 {name}({args})" if args else f"🔧 {name}"
-        console.print(Text(label))
 
-    def on_tool_result(name: str, result: Any) -> None:
-        if isinstance(result, BaseException):
-            console.print(Text(f"✖ {name}: {result}"))
-            return
-        if isinstance(result, str):
-            preview = _preview_result(result)
-        else:
-            preview = _preview_result(str(result))
-        if preview:
-            console.print(Text(f"✔ {name}: {preview}"))
-        else:
-            console.print(Text(f"✔ {name}"))
+def _argument_value(value: Any) -> Text:
+    """Одно значение аргумента: JSON-вид с цветом по типу."""
+    if isinstance(value, str):
+        body, style = json.dumps(value, ensure_ascii=False), "yellow"
+    elif isinstance(value, bool):
+        body, style = json.dumps(value), "magenta"
+    elif isinstance(value, int | float):
+        body, style = str(value), "magenta"
+    elif value is None:
+        body, style = "null", "magenta"
+    else:
+        body = json.dumps(value, ensure_ascii=False, default=str)
+        style = "cyan"
+    return Text(body, style=style)
 
-    return on_tool_call, on_tool_result
+
+def _tool_call_text(name: str, arguments: dict[str, Any]) -> Text:
+    """Строка события «вызов инструмента»: имя и аргументы в цвете."""
+    text = Text()
+    text.append("🔧 ", style="dim")
+    text.append(name, style="bold cyan")
+    if arguments:
+        args = Text()
+        for index, (key, value) in enumerate(arguments.items()):
+            if index:
+                args.append(" ")
+            args.append(key, style="bold")
+            args.append("=")
+            args.append_text(_clip(_argument_value(value), _VALUE_LIMIT))
+        text.append("  ")
+        text.append_text(_clip(args, _PREVIEW_LIMIT))
+    return text
+
+
+def _tool_result_text(name: str, result: Any) -> Text:
+    """Строка события «результат инструмента»: успех или ошибка в цвете."""
+    if isinstance(result, BaseException):
+        return Text(f"✖ {name}: {result}", style="bold red")
+
+    preview = _preview_result(str(result) if not isinstance(result, str) else result)
+    text = Text()
+    text.append("✔ ", style="green")
+    text.append(name, style="bold cyan")
+    if preview:
+        text.append(" → ")
+        text.append(preview, style="dim")
+    return text
+
+
+class _ToolFeed:
+    """Потокобезопасный буфер событий вызовов инструментов.
+
+    Хуки обёрток инструментов (``build_agent``) срабатывают в потоке,
+    где исполняется агент, а рисовать в консоль можно только из главного
+    потока — иначе вывод конфликтует со спиннером rich. Поэтому события
+    складываются в очередь и печатаются методом ``print_pending`` из цикла
+    анимации (или сразу после ответа, если терминала нет).
+    """
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        self._events: Queue[ToolEvent] = Queue()
+        self._closed = False
+        # Последнее напечатанное событие: чтобы спиннер показывал имя тула,
+        # который сейчас исполняется (пока не пришёл его результат).
+        self.last_kind: str | None = None
+        self.last_name: str | None = None
+
+    @property
+    def empty(self) -> bool:
+        """Пуста ли очередь событий."""
+        return self._events.empty()
+
+    def close(self) -> None:
+        """Закрыть буфер и отбросить необработанные события.
+
+        Вызывается при прерывании ответа: «зомби»-поток агента продолжит
+        работу в фоне, но его события больше не попадут в консоль.
+        """
+        self._closed = True
+        while not self._events.empty():
+            try:
+                self._events.get_nowait()
+            except Empty:
+                return
+
+    # Хуки для ``build_agent`` (вызываются в потоке исполнения агента).
+    def on_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
+        """Запомнить событие вызова инструмента."""
+        if not self._closed:
+            self._events.put(("call", name, arguments))
+
+    def on_tool_result(self, name: str, result: Any) -> None:
+        """Запомнить событие результата инструмента."""
+        if not self._closed:
+            self._events.put(("result", name, result))
+
+    def print_pending(self) -> None:
+        """Напечатать все накопленные события (только из главного потока)."""
+        while not self._events.empty():
+            try:
+                kind, name, payload = self._events.get_nowait()
+            except Empty:
+                return
+            if kind == "call":
+                self._console.print(_tool_call_text(name, payload))
+            else:
+                self._console.print(_tool_result_text(name, payload))
+            self.last_kind, self.last_name = kind, name
 
 
 def _stream_answer(agent: ReplAgent, user_input: str, console: Console) -> None:
@@ -150,14 +254,75 @@ def _stream_answer(agent: ReplAgent, user_input: str, console: Console) -> None:
         console.print()
 
 
-def _print_answer(agent: ReplAgent, user_input: str, console: Console) -> None:
+def _answer_with_animation(
+    agent: ReplAgent,
+    user_input: str,
+    console: Console,
+    feed: _ToolFeed,
+) -> None:
+    """Ответ агента с тулами: спиннер «думаю…» + живой цветной лог вызовов.
+
+    ``agent.run`` исполняется в фоновом потоке (в ember с тулами потоковой
+    печати нет), а главный поток крутит rich ``Status`` и печатает события
+    инструментов из очереди ``feed`` — весь вывод идёт из одного потока,
+    поэтому спиннер не «дерёт» консоль. Пока исполняется конкретный тул,
+    спиннер показывает его имя.
+    """
+    outcome: dict[str, Any] = {}
+
+    def worker() -> None:
+        try:
+            outcome["text"] = agent.run(user_input)
+        except Exception as exc:  # результат покажем как ошибку ответа
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=worker, name="ember-agent-run", daemon=True)
+    thread.start()
+
+    try:
+        with console.status(_THINKING_TEXT, spinner="dots") as status:
+            while thread.is_alive() or not feed.empty:
+                feed.print_pending()
+                if feed.last_kind == "call":
+                    status.update(f"🔧 {feed.last_name}…")
+                else:
+                    status.update(_THINKING_TEXT)
+                time.sleep(_SPINNER_POLL_SECONDS)
+            feed.print_pending()
+    except KeyboardInterrupt:
+        # Прерываем только показ: агент в фоне доработает, его события гасим.
+        feed.close()
+        console.print(Text("Ответ прерван."))
+        return
+
+    thread.join()
+    error = outcome.get("error")
+    if error is not None:
+        if isinstance(error, BaseException):
+            raise error
+        raise RuntimeError(str(error))
+    console.print(Markdown(outcome["text"]))
+
+
+def _print_answer(
+    agent: ReplAgent,
+    user_input: str,
+    console: Console,
+    feed: _ToolFeed | None = None,
+) -> None:
     """Получить и напечатать ответ агента на сообщение пользователя."""
     console.print(Text(AGENT_LABEL, style="bold cyan"))
     if agent.tools:
-        # С тулами stream_run() в ember не работает: показываем «думаю…»
-        # и живые вызовы инструментов (их печатают колбэки build_agent).
-        console.print(Text("думаю…"))
-        console.print(Markdown(agent.run(user_input)))
+        if feed is not None and console.is_terminal:
+            _answer_with_animation(agent, user_input, console, feed)
+        else:
+            # Без терминала анимировать нечего: «думаю…», затем лог вызовов
+            # (накопился в очереди за время ответа) и сам ответ.
+            console.print(Text("думаю…", style="dim"))
+            answer = agent.run(user_input)
+            if feed is not None:
+                feed.print_pending()
+            console.print(Markdown(answer))
     else:
         _stream_answer(agent, user_input, console)
 
@@ -185,6 +350,7 @@ def _session(
     agent: ReplAgent,
     console: Console,
     input_fn: Callable[[str], str],
+    feed: _ToolFeed | None = None,
 ) -> int:
     """Цикл диалога: ввод строк, команды, ответы агента. Код выхода 0."""
     provider, model, tool_names = _agent_context(agent)
@@ -223,7 +389,7 @@ def _session(
             continue
 
         try:
-            _print_answer(agent, line, console)
+            _print_answer(agent, line, console, feed)
         except KeyboardInterrupt:
             console.print(Text("Ответ прерван."))
         except Exception as exc:
@@ -238,8 +404,10 @@ def run_repl(
 ) -> int:
     """Запустить интерактивный диалог с агентом из конфигурации.
 
-    Создаёт агента через ``factory.build_agent`` с колбэками, печатающими
-    процесс вызова инструментов в консоль. Возвращает код выхода 0.
+    Создаёт агента через ``factory.build_agent`` с хуками, которые пишут
+    события вызовов инструментов в буфер ``_ToolFeed``: в терминале их
+    печатает цикл анимации, в перенаправленном выводе — сразу после ответа.
+    Возвращает код выхода 0.
 
     Args:
         config: Конфигурация агента.
@@ -248,10 +416,10 @@ def run_repl(
             по умолчанию — ``console.input`` (rich-markup приглашения).
     """
     console = console or Console()
-    on_tool_call, on_tool_result = _tool_hooks(console)
+    feed = _ToolFeed(console)
     with build_agent(
         config,
-        on_tool_call=on_tool_call,
-        on_tool_result=on_tool_result,
+        on_tool_call=feed.on_tool_call,
+        on_tool_result=feed.on_tool_result,
     ) as agent:
-        return _session(agent, console, input_fn or console.input)
+        return _session(agent, console, input_fn or console.input, feed=feed)
