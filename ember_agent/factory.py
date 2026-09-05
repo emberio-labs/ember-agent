@@ -7,11 +7,11 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from typing import Any
 
-from ember import Agent, MCPClient, MockProvider, OpenAIProvider
+from ember import Agent, FunctionTool, MCPClient, MockProvider, OpenAIProvider
 
 from ember_agent.config import (
     PROVIDER_MOCK,
@@ -23,6 +23,11 @@ from ember_agent.config import (
     MCPServerConfig,
     ProviderConfig,
 )
+
+#: Вызывается перед исполнением инструмента: имя и аргументы из tool_calls.
+type ToolCallHook = Callable[[str, dict[str, Any]], None]
+#: Вызывается после исполнения инструмента: результат (или исключение).
+type ToolResultHook = Callable[[str, Any], None]
 
 
 def build_provider(config: ProviderConfig) -> MockProvider | OpenAIProvider:
@@ -51,6 +56,48 @@ def build_provider(config: ProviderConfig) -> MockProvider | OpenAIProvider:
     raise ConfigError(f"Неизвестный тип провайдера: {config.type!r}")  # не должно достигаться
 
 
+def wrap_tool(
+    tool: FunctionTool,
+    *,
+    on_tool_call: ToolCallHook | None = None,
+    on_tool_result: ToolResultHook | None = None,
+) -> FunctionTool:
+    """Обернуть ``FunctionTool`` прокси с логированием вызовов.
+
+    В ``Agent`` (ember) нет событий/хуков, но инструменты вызываются как
+    ``tool.func(**arguments)``. Прокси сохраняет ``name``/``description``/
+    ``parameters`` оригинала (индексация ``Agent`` по имени не меняется),
+    а его ``func`` перед делегированием зовёт ``on_tool_call``, после —
+    ``on_tool_result`` (с результатом или перехваченным исключением).
+
+    Если колбэки не переданы, возвращается исходный инструмент без обёртки.
+    """
+    if on_tool_call is None and on_tool_result is None:
+        return tool
+
+    original_func = tool.func
+
+    def logged_func(**arguments: Any) -> Any:
+        if on_tool_call is not None:
+            on_tool_call(tool.name, arguments)
+        try:
+            result = original_func(**arguments)
+        except Exception as exc:
+            if on_tool_result is not None:
+                on_tool_result(tool.name, exc)
+            raise
+        if on_tool_result is not None:
+            on_tool_result(tool.name, result)
+        return result
+
+    return FunctionTool(
+        name=tool.name,
+        description=tool.description,
+        parameters=tool.parameters,
+        func=logged_func,
+    )
+
+
 def _open_mcp_client(config: MCPServerConfig) -> MCPClient:
     """Создаёт (ещё не открытый) MCP-клиент по конфигурации сервера."""
     if config.transport == TRANSPORT_STDIO:
@@ -73,7 +120,12 @@ def _open_mcp_client(config: MCPServerConfig) -> MCPClient:
 
 
 @contextmanager
-def build_agent(config: AgentConfig) -> Iterator[Agent]:
+def build_agent(
+    config: AgentConfig,
+    *,
+    on_tool_call: ToolCallHook | None = None,
+    on_tool_result: ToolResultHook | None = None,
+) -> Iterator[Agent]:
     """Создаёт агента ``ember`` из конфигурации.
 
     Контекстный менеджер: пока контекст открыт, живут MCP-клиенты
@@ -81,15 +133,28 @@ def build_agent(config: AgentConfig) -> Iterator[Agent]:
 
     Модель агенту не передаётся: она задана провайдеру (``[provider] model``),
     а агент ``ember`` наследует модель провайдера по умолчанию.
+
+    Args:
+        config: Конфигурация агента.
+        on_tool_call: Колбэк перед вызовом инструмента (имя, аргументы).
+        on_tool_result: Колбэк после вызова (имя, результат или исключение).
+            Нужен для показа процесса использования тулов в интерактивном
+            режиме: каждый инструмент оборачивается прокси через ``wrap_tool``.
     """
     provider = build_provider(config.provider)
 
     with ExitStack() as stack:
-        tools: list[Any] = []
+        tools: list[FunctionTool] = []
         for server in config.mcp_servers:
             client = _open_mcp_client(server)
             stack.enter_context(client)
-            tools.extend(client.list_tools())
+            for tool in client.list_tools():
+                wrapped = wrap_tool(
+                    tool,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                )
+                tools.append(wrapped)
 
         kwargs: dict[str, Any] = {"provider": provider, "system_prompt": config.system_prompt}
         if tools:
