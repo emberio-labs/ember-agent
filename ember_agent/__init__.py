@@ -15,4 +15,4 @@ __all__ = ["__version__"]
 try:
     __version__ = version("emberio-labs-ember-agent")
 except PackageNotFoundError:  # пакет не установлен (запуск из исходников)
-    __version__ = "0.1.0"
+    __version__ = "0.2.0"
