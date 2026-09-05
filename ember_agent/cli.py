@@ -23,8 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ember-agent",
         description=(
-            "Готовый к запуску агент на базе ember: настройка в TOML, "
-            "запуск одной командой."
+            "Готовый к запуску агент на базе ember: настройка в TOML, запуск одной командой."
         ),
     )
     parser.add_argument(

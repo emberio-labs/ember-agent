@@ -12,12 +12,10 @@ from ember_agent.cli import main
 def _write_mock_config(tmp_path: Path, system_prompt: str = "Ты тестовый агент.") -> Path:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        textwrap.dedent(
-            f"""\
+        textwrap.dedent(f"""\
             [agent]
             system_prompt = "{system_prompt}"
-            """
-        ),
+            """),
         encoding="utf-8",
     )
     return config_path

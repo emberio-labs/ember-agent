@@ -26,8 +26,7 @@ def test_defaults_use_mock_provider() -> None:
 def test_load_full_config(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        textwrap.dedent(
-            """\
+        textwrap.dedent("""\
             [agent]
             system_prompt = "Бот поддержки"
 
@@ -45,8 +44,7 @@ def test_load_full_config(tmp_path: Path) -> None:
             transport = "http"
             url = "https://mcp.example.com/mcp"
             headers = { Authorization = "Bearer token" }
-            """
-        ),
+            """),
         encoding="utf-8",
     )
 
