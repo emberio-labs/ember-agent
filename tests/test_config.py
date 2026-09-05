@@ -17,9 +17,9 @@ def test_defaults_use_mock_provider() -> None:
     config = AgentConfig()
 
     assert config.provider.type == "mock"
+    assert config.provider.model is None
     assert config.provider.api_key_env == "OPENAI_API_KEY"
     assert config.system_prompt
-    assert config.model is None
     assert config.mcp_servers == []
 
 
@@ -30,10 +30,10 @@ def test_load_full_config(tmp_path: Path) -> None:
             """\
             [agent]
             system_prompt = "Бот поддержки"
-            model = "gpt-4o-mini"
 
             [provider]
             type = "openai"
+            model = "gpt-4o-mini"
             base_url = "https://api.example.com/v1"
 
             [[mcp.servers]]
@@ -53,8 +53,8 @@ def test_load_full_config(tmp_path: Path) -> None:
     config = load_config(config_path)
 
     assert config.system_prompt == "Бот поддержки"
-    assert config.model == "gpt-4o-mini"
     assert config.provider.type == "openai"
+    assert config.provider.model == "gpt-4o-mini"
     assert config.provider.api_key_env == "OPENAI_API_KEY"
     assert config.provider.base_url == "https://api.example.com/v1"
     assert len(config.mcp_servers) == 2

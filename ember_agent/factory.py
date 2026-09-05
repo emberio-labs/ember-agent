@@ -26,7 +26,11 @@ from ember_agent.config import (
 
 
 def build_provider(config: ProviderConfig) -> MockProvider | OpenAIProvider:
-    """Создаёт провайдера ``ember`` по конфигурации."""
+    """Создаёт провайдера ``ember`` по конфигурации.
+
+    Модель задаётся провайдеру: в ``ember`` именно провайдер подставляет
+    свою модель по умолчанию, когда агент её не переопределил.
+    """
     if config.type == PROVIDER_MOCK:
         return MockProvider()
 
@@ -38,6 +42,8 @@ def build_provider(config: ProviderConfig) -> MockProvider | OpenAIProvider:
                 f"{config.api_key_env!r} (или укажите другую в [provider].api_key_env)"
             )
         kwargs: dict[str, str] = {}
+        if config.model:
+            kwargs["model"] = config.model
         if config.base_url:
             kwargs["base_url"] = config.base_url
         return OpenAIProvider(api_key=api_key, **kwargs)
@@ -72,6 +78,9 @@ def build_agent(config: AgentConfig) -> Iterator[Agent]:
 
     Контекстный менеджер: пока контекст открыт, живут MCP-клиенты
     (stdio-процессы и HTTP-соединения), после выхода — корректно закрываются.
+
+    Модель агенту не передаётся: она задана провайдеру (``[provider] model``),
+    а агент ``ember`` наследует модель провайдера по умолчанию.
     """
     provider = build_provider(config.provider)
 
@@ -83,8 +92,6 @@ def build_agent(config: AgentConfig) -> Iterator[Agent]:
             tools.extend(client.list_tools())
 
         kwargs: dict[str, Any] = {"provider": provider, "system_prompt": config.system_prompt}
-        if config.model:
-            kwargs["model"] = config.model
         if tools:
             kwargs["tools"] = tools
 

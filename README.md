@@ -13,10 +13,11 @@ ember-agent 0.1.0
 
 ## Возможности
 
-- Конфигурация в одном TOML-файле: системный промпт, модель, провайдер, MCP-инструменты.
+- Конфигурация в одном TOML-файле: системный промпт, провайдер LLM (ключ, модель, base_url), MCP-инструменты.
 - Интерактивный диалог в терминале или разовый запрос (`--message`) для скриптов.
 - Провайдеры: `mock` (без сети и ключей, для экспериментов и тестов) и `openai`
   (OpenAI и любые OpenAI-совместимые API: OpenRouter, Groq, vLLM, LM Studio и т.п.).
+- Модель задаётся провайдеру (`[provider] model`) — как часть «подключения к LLM».
 - Инструменты по [MCP](https://modelcontextprotocol.io): `stdio`-процессы и streamable HTTP-серверы.
 - Работает на Python 3.12+.
 
@@ -50,11 +51,11 @@ cp config.example.toml config.toml
 ```toml
 [agent]
 system_prompt = "Ты полезный и краткий помощник."   # как агент себя ведёт
-model = "gpt-4o-mini"                               # модель по умолчанию
 
 [provider]
-type = "mock"          # "mock" | "openai"
-api_key_env = "OPENAI_API_KEY"  # откуда брать ключ (для type = "openai")
+type = "mock"                  # "mock" | "openai"
+model = "gpt-4o-mini"          # модель подключения LLM (для type = "openai")
+api_key_env = "OPENAI_API_KEY" # откуда брать ключ (для type = "openai")
 
 [[mcp.servers]]                       # внешние инструменты (опционально)
 transport = "stdio"                   # "stdio" | "http"
@@ -64,6 +65,7 @@ args = ["path/to/server.py"]
 
 Полный пример с комментариями — в [`config.example.toml`](config.example.toml).
 Для реального провайдера задайте переменную окружения с ключом, например `OPENAI_API_KEY`.
+Если модель не указана, провайдер берёт свою по умолчанию (`gpt-4o-mini` у OpenAI).
 
 ## Запуск
 

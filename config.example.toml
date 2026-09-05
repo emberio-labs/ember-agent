@@ -6,15 +6,15 @@
 [agent]
 # Системный промпт: как агент себя ведёт.
 system_prompt = "Ты полезный и краткий помощник."
-# Модель по умолчанию. Для реального провайдера укажите свою,
-# например "gpt-4o-mini" (OpenAI) или "llama-3.1-8b-instant" (Groq и др.).
-# model = "gpt-4o-mini"
 
 [provider]
 # Тип провайдера:
 #   "mock"   — работает без сети и ключей (по умолчанию, для экспериментов)
 #   "openai" — OpenAI и любые OpenAI-совместимые API (OpenRouter, Groq, vLLM, LM Studio...)
 type = "mock"
+# Модель подключения LLM (для type = "openai"). Если не задана, провайдер
+# берёт свою модель по умолчанию ("gpt-4o-mini" у OpenAI).
+# model = "gpt-4o-mini"
 # Переменная окружения, из которой берётся API-ключ (для type = "openai").
 api_key_env = "OPENAI_API_KEY"
 # Полный base_url до /v1-совместимого API (для type = "openai", опционально).

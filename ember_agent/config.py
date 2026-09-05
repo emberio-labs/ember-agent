@@ -81,9 +81,12 @@ class MCPServerConfig:
 
 @dataclass
 class ProviderConfig:
-    """Настройки LLM-провайдера."""
+    """Настройки LLM-провайдера: как и через какую модель агент ходит к LLM."""
 
     type: str = PROVIDER_MOCK
+    #: Модель подключения LLM. Если не задана, провайдер берёт свою модель
+    #: по умолчанию (например, "gpt-4o-mini" у OpenAI).
+    model: str | None = None
     #: Переменная окружения с API-ключом (для type = "openai").
     api_key_env: str = "OPENAI_API_KEY"
     #: Полный base_url OpenAI-совместимого API (опционально).
@@ -95,8 +98,6 @@ class AgentConfig:
     """Полная конфигурация агента после чтения TOML-файла."""
 
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
-    #: Модель по умолчанию; если не задана — модель провайдера/эмбеддера.
-    model: str | None = None
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     mcp_servers: list[MCPServerConfig] = field(default_factory=list)
 
@@ -112,7 +113,6 @@ class AgentConfig:
 
         return cls(
             system_prompt=_require_str(agent_section, "system_prompt", DEFAULT_SYSTEM_PROMPT),
-            model=_optional_str(agent_section, "model"),
             provider=_parse_provider(provider_section),
             mcp_servers=_parse_mcp_servers(data.get("mcp")),
         )
@@ -127,6 +127,7 @@ def _parse_provider(data: dict[str, Any]) -> ProviderConfig:
 
     return ProviderConfig(
         type=provider_type,
+        model=_optional_str(data, "model"),
         api_key_env=_require_str(data, "api_key_env", "OPENAI_API_KEY"),
         base_url=_optional_str(data, "base_url"),
     )
