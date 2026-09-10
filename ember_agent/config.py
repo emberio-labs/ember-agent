@@ -19,9 +19,6 @@ DEFAULT_SYSTEM_PROMPT = "Ты полезный и краткий помощни�
 #: Директория памяти по умолчанию (относительный путь — от текущей рабочей директории).
 DEFAULT_MEMORY_DIRECTORY = ".ember/memory"
 
-#: Идентификатор сессии памяти по умолчанию.
-DEFAULT_SESSION_ID = "default"
-
 PROVIDER_MOCK = "mock"
 PROVIDER_OPENAI = "openai"
 VALID_PROVIDERS: frozenset[str] = frozenset({PROVIDER_MOCK, PROVIDER_OPENAI})
@@ -132,9 +129,11 @@ class MemoryConfig:
     #: Директория с файлами сессий (по файлу ``<session_id>.json`` на сессию).
     #: Относительный путь — от текущей рабочей директории.
     directory: str = DEFAULT_MEMORY_DIRECTORY
-    #: Идентификатор сессии: запуски с одним ``session_id`` продолжают друг друга,
-    #: а из остальных сессий агент подтягивает релевантные фрагменты (recall).
-    session_id: str = DEFAULT_SESSION_ID
+    #: Идентификатор сессии. ``None`` (по умолчанию) — каждый запуск начинает
+    #: новый диалог с сгенерированным id; прошлые диалоги при этом не теряются —
+    #: их подмешивает recall. Явное значение (например, ``"my-project"``)
+    #: продолжает ту же сессию: запуски с одним ``session_id`` пишут в один диалог.
+    session_id: str | None = None
 
 
 @dataclass
@@ -188,16 +187,14 @@ def _parse_memory(raw: Any) -> MemoryConfig:
     memory_type = _require_str(raw, "type", MEMORY_FILE)
     if memory_type not in VALID_MEMORY_TYPES:
         valid = ", ".join(sorted(VALID_MEMORY_TYPES))
-        raise ConfigError(
-            f"Неизвестный тип памяти {memory_type!r}; ожидается одно из: {valid}"
-        )
+        raise ConfigError(f"Неизвестный тип памяти {memory_type!r}; ожидается одно из: {valid}")
 
     directory = _require_str(raw, "directory", DEFAULT_MEMORY_DIRECTORY)
     if not directory.strip():
         raise ConfigError("Поле '[memory].directory' не может быть пустым")
 
-    session_id = _require_str(raw, "session_id", DEFAULT_SESSION_ID)
-    if not session_id.strip():
+    session_id = _optional_str(raw, "session_id")
+    if session_id is not None and not session_id.strip():
         raise ConfigError("Поле '[memory].session_id' не может быть пустым")
 
     return MemoryConfig(

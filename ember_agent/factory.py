@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import os
+import secrets
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
+from datetime import datetime
 from typing import Any
 
 from ember import (
@@ -107,6 +109,41 @@ def build_memory(config: MemoryConfig) -> Memory | None:
     return factory(config)
 
 
+#: Формат временной части id новой сессии.
+_SESSION_ID_TIME_FORMAT = "%Y%m%d-%H%M%S"
+
+#: Сколько случайных байт добавлять к id новой сессии.
+_SESSION_ID_SUFFIX_BYTES = 3
+
+
+def new_session_id() -> str:
+    """Сгенерировать id новой сессии: ``20260910-221503-4f1a2b``.
+
+    Время идёт первым, поэтому сессии сортируются по имени файла; случайный
+    суффикс разводит запуски, начавшиеся в одну секунду, — иначе два
+    одновременных запуска писали бы в один файл сессии.
+    """
+    stamp = datetime.now().strftime(_SESSION_ID_TIME_FORMAT)
+    return f"{stamp}-{secrets.token_hex(_SESSION_ID_SUFFIX_BYTES)}"
+
+
+def resolve_session_id(config: MemoryConfig) -> str | None:
+    """Определить id сессии для текущего запуска.
+
+    ``None`` — память выключена. Если ``[memory] session_id`` задан явно, он
+    означает «продолжить эту сессию» и возвращается как есть. Если не задан —
+    генерируется новый id: по умолчанию каждый запуск начинает отдельный
+    диалог, а прошлые сессии остаются доступны через recall (их подмешивает
+    ``ember`` при ответе).
+
+    Args:
+        config: Секция ``[memory]`` конфигурации.
+    """
+    if not config.enabled:
+        return None
+    return config.session_id or new_session_id()
+
+
 def wrap_tool(
     tool: FunctionTool,
     *,
@@ -187,9 +224,9 @@ def build_agent(
 
     Если память включена (``[memory] enabled`` или флаг ``--session``), агент
     получает хранилище (интерфейс ``Memory``, конкретный класс выбирает
-    ``build_memory``) и ``session_id``: при старте он продолжает сохранённую
-    сессию, а после каждого ответа сохраняет диалог. Механизм recall — внутри
-    ``ember``.
+    ``build_memory``) и ``session_id`` (см. ``resolve_session_id``): при старте
+    он продолжает сохранённую сессию, а после каждого ответа сохраняет диалог.
+    Механизм recall — внутри ``ember``.
 
     Args:
         config: Конфигурация агента.
@@ -200,6 +237,7 @@ def build_agent(
     """
     provider = build_provider(config.provider)
     memory = build_memory(config.memory)
+    session_id = resolve_session_id(config.memory)
 
     with ExitStack() as stack:
         tools: list[FunctionTool] = []
@@ -217,9 +255,10 @@ def build_agent(
         kwargs: dict[str, Any] = {"provider": provider, "system_prompt": config.system_prompt}
         if tools:
             kwargs["tools"] = tools
-        if memory is not None:
+        if memory is not None and session_id is not None:
             # memory и session_id идут только вместе — контракт Agent (ember).
+            # session_id — из resolve_session_id: явный из TOML либо новый.
             kwargs["memory"] = memory
-            kwargs["session_id"] = config.memory.session_id
+            kwargs["session_id"] = session_id
 
         yield Agent(**kwargs)

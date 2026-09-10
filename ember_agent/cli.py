@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ember_agent import __version__
 from ember_agent.config import DEFAULT_CONFIG_FILE, AgentConfig, ConfigError, load_config
-from ember_agent.factory import build_agent
+from ember_agent.factory import build_agent, resolve_session_id
 from ember_agent.repl import run_repl
 
 
@@ -74,6 +74,29 @@ def _apply_memory_overrides(config: AgentConfig, args: argparse.Namespace) -> Ag
     return replace(config, memory=memory)
 
 
+def _resolve_memory_session(config: AgentConfig) -> tuple[AgentConfig, str | None]:
+    """Зафиксировать id сессии памяти на этот запуск.
+
+    Если ``session_id`` не задан, он генерируется здесь, а не только в фабрике:
+    так CLI знает id и может подсказать команду продолжения диалога.
+    Возвращается конфигурация (с уже явным id) и сам id либо ``None``, если
+    память выключена.
+    """
+    session_id = resolve_session_id(config.memory)
+    if session_id is None or session_id == config.memory.session_id:
+        return config, session_id
+    return replace(config, memory=replace(config.memory, session_id=session_id)), session_id
+
+
+def _print_session_hint(session_id: str, directory: str) -> None:
+    """Подсказать id сессии после разового запуска.
+
+    Пишем в stderr: stdout остаётся чистым ответом агента (удобно для скриптов).
+    """
+    message = f"🗂 сессия памяти: {session_id} ({directory}) — продолжить: --session {session_id}"
+    print(message, file=sys.stderr)
+
+
 def _print_error(message: str) -> None:
     print(f"ошибка: {message}", file=sys.stderr)
 
@@ -87,9 +110,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     try:
         if args.message:
+            config, session_id = _resolve_memory_session(config)
             with build_agent(config) as agent:
                 print(agent.run(args.message))
-                return 0
+            if session_id is not None:
+                _print_session_hint(session_id, config.memory.directory)
+            return 0
         # Интерактивный диалог живёт в ember_agent.repl: там же создаётся
         # агент с колбэками показа вызовов инструментов.
         return run_repl(config)

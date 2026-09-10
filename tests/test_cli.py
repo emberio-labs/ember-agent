@@ -167,3 +167,83 @@ def test_session_and_no_memory_are_mutually_exclusive(
 
     capsys.readouterr()
     assert exc_info.value.code == 2
+
+
+AUTO_MEMORY_SECTION = textwrap.dedent("""\
+    [memory]
+    enabled = true
+    directory = "mem"
+    """)
+
+
+def test_memory_without_session_id_starts_new_dialog_each_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.toml").write_text(AUTO_MEMORY_SECTION, encoding="utf-8")
+
+    first = main(["run", "--message", "Первое сообщение"])
+    first_run = capsys.readouterr()
+    second = main(["run", "--message", "Второе сообщение"])
+    second_run = capsys.readouterr()
+
+    assert (first, second) == (0, 0)
+    assert len(list((tmp_path / "mem").glob("*.json"))) == 2, "у каждого запуска свой файл"
+    # stdout — чистый ответ агента, про сессию сообщаем в stderr.
+    assert "сессия памяти" not in first_run.out
+    assert "сессия памяти" in first_run.err
+    assert first_run.err != second_run.err, "у каждого запуска свой id"
+
+    def _session_file(run: str) -> str:
+        session_id = run.split("--session ")[-1].strip()
+        return (tmp_path / "mem" / f"{session_id}.json").read_text(encoding="utf-8")
+
+    assert "Первое сообщение" in _session_file(first_run.err)
+    second_session = _session_file(second_run.err)
+    assert "Первое сообщение" not in second_session, "диалог начинается с нуля"
+    assert "Второе сообщение" in second_session
+
+
+def test_session_hint_gives_reusable_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.toml").write_text(AUTO_MEMORY_SECTION, encoding="utf-8")
+
+    code = main(["run", "--message", "Привет"])
+    hint = capsys.readouterr().err
+
+    assert code == 0
+    session_id = hint.split("--session ")[-1].strip()
+    assert session_id, hint
+    assert (tmp_path / "mem" / f"{session_id}.json").is_file(), hint
+
+
+def test_session_hint_absent_without_memory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_mock_config(tmp_path)
+
+    code = main(["run", "--message", "Привет"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.err == "", "без памяти подсказки про сессию быть не должно"
+
+
+def test_session_flag_continues_dialog_across_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_mock_config(tmp_path)
+
+    first = main(["run", "--message", "Первое сообщение", "--session", "cli"])
+    capsys.readouterr()
+    second = main(["run", "--message", "Второе сообщение", "--session", "cli"])
+    capsys.readouterr()
+
+    saved = (tmp_path / ".ember" / "memory" / "cli.json").read_text(encoding="utf-8")
+    assert (first, second) == (0, 0)
+    assert "Первое сообщение" in saved, "явная сессия должна продолжаться"
+    assert "Второе сообщение" in saved

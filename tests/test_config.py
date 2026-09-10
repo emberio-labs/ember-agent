@@ -32,7 +32,7 @@ def test_defaults_have_memory_disabled() -> None:
     assert config.memory.enabled is False
     assert config.memory.type == MEMORY_FILE == "file"
     assert config.memory.directory == ".ember/memory"
-    assert config.memory.session_id == "default"
+    assert config.memory.session_id is None, "не задан → каждый запуск новый диалог"
 
 
 def test_load_full_config(tmp_path: Path) -> None:
@@ -106,7 +106,7 @@ def test_memory_section_uses_field_defaults(tmp_path: Path) -> None:
 
     assert config.memory.enabled is True
     assert config.memory.directory == ".ember/memory"
-    assert config.memory.session_id == "default"
+    assert config.memory.session_id is None, "не задан → каждый запуск новый диалог"
 
 
 def test_memory_type_defaults_to_file(tmp_path: Path) -> None:

@@ -44,7 +44,7 @@ def _mock_agent(system_prompt: str = "Ты тестовый агент.") -> Age
     )
 
 
-def _memory_config(tmp_path: Path, *, session_id: str = "default") -> AgentConfig:
+def _memory_config(tmp_path: Path, *, session_id: str = "repl") -> AgentConfig:
     """Конфигурация агента с включённой памятью в ``tmp_path``."""
     return AgentConfig(
         memory=MemoryConfig(
@@ -114,6 +114,7 @@ def test_format_greeting_reports_memory_session() -> None:
     )
 
     assert "🗂 память: сессия 'default' → .ember/memory" in text
+    assert "↻ продолжить диалог: ember-agent run --session default" in text
 
 
 def test_help_text_documents_commands() -> None:
@@ -379,4 +380,20 @@ def test_run_repl_with_memory_config(tmp_path: Path, capsys: pytest.CaptureFixtu
     captured = capsys.readouterr()
     assert code == 0
     assert "🗂 память: сессия 'repl'" in captured.out
+    assert "↻ продолжить диалог: ember-agent run --session repl" in captured.out
     assert FileMemory(tmp_path / "mem").load_session("repl"), "диалог должен сохраниться"
+
+
+def test_run_repl_without_session_id_starts_new_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = tmp_path / "mem"
+    config = AgentConfig(memory=MemoryConfig(enabled=True, directory=str(directory)))
+
+    code = run_repl(config, input_fn=_make_input("привет", "exit"))
+
+    captured = capsys.readouterr()
+    files = sorted(directory.glob("*.json"))
+    assert code == 0
+    assert len(files) == 1, "интерактивный запуск пишет одну новую сессию"
+    assert files[0].stem in captured.out, "id сессии из баннера — тот же, что на диске"

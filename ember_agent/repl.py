@@ -102,6 +102,7 @@ def format_greeting(
         lines.append("🧰 инструменты: нет")
     if session_id and memory_directory:
         lines.append(f"🗂 память: сессия {session_id!r} → {memory_directory}")
+        lines.append(f"↻ продолжить диалог: ember-agent run --session {session_id}")
     else:
         lines.append("🗂 память: выключена")
     lines.extend(["", "💬 Введите сообщение или наберите /help."])

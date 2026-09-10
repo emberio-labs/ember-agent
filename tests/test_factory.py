@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from ember import (
 from ember.memory import FileMemory
 from ember_agent import factory as factory_module
 from ember_agent.config import AgentConfig, ConfigError, MemoryConfig
-from ember_agent.factory import build_agent, build_memory, wrap_tool
+from ember_agent.factory import build_agent, build_memory, resolve_session_id, wrap_tool
 
 
 def _echo_tool() -> FunctionTool:
@@ -256,3 +257,65 @@ def test_memory_recall_skips_current_session(
 
     assert stub.searches, "агент должен спросить прошлые сессии"
     assert {session for _, session in stub.searches} == {"current"}
+
+
+# --- выбор сессии: явная или новая ---------------------------------------
+
+
+def test_resolve_session_id_disabled_is_none(tmp_path: Path) -> None:
+    assert resolve_session_id(MemoryConfig(directory=str(tmp_path))) is None
+
+
+def test_resolve_session_id_keeps_explicit_session() -> None:
+    config = MemoryConfig(enabled=True, session_id="project")
+
+    assert resolve_session_id(config) == "project"
+
+
+def test_resolve_session_id_generates_unique_ids() -> None:
+    config = MemoryConfig(enabled=True)
+
+    first, second = resolve_session_id(config), resolve_session_id(config)
+
+    assert first is not None
+    assert second is not None
+    assert first != second, "два запуска не должны попадать в одну сессию"
+    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", first), first
+
+
+def test_build_agent_generates_session_id_when_unset(tmp_path: Path) -> None:
+    directory = tmp_path / "mem"
+    config = AgentConfig(memory=MemoryConfig(enabled=True, directory=str(directory)))
+
+    with build_agent(config) as agent:
+        session_id = agent.session_id
+        agent.run("Запомни: кодовое слово — сирень")
+
+    assert session_id is not None
+    assert session_id != config.memory.session_id
+    saved = FileMemory(directory).load_session(session_id)
+    assert saved, "диалог должен сохраниться в сессии, id которой выбрал агент"
+
+
+def test_auto_session_starts_new_dialog_each_run(tmp_path: Path) -> None:
+    directory = tmp_path / "mem"
+    config = AgentConfig(memory=MemoryConfig(enabled=True, directory=str(directory)))
+
+    with build_agent(config) as first:
+        first_id = first.session_id
+        first.run("Первое сообщение")
+
+    with build_agent(config) as second:
+        second_id = second.session_id
+        assert second_id != first_id, "каждый запуск получает свой id сессии"
+        roles = [message.role for message in second.messages]
+        assert roles == ["system"], "новый запуск начинает диалог с нуля"
+        second.run("Второе сообщение")
+
+    assert first_id is not None
+    assert second_id is not None
+    first_file = (directory / f"{first_id}.json").read_text(encoding="utf-8")
+    second_file = (directory / f"{second_id}.json").read_text(encoding="utf-8")
+    assert "Первое сообщение" in first_file
+    assert "Первое сообщение" not in second_file, "прошлый диалог не подмешивается в новый"
+    assert "Второе сообщение" in second_file
