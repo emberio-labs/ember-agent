@@ -8,7 +8,7 @@
 
 ```text
 $ ember-agent --version
-ember-agent 0.2.0
+ember-agent 0.3.0
 ```
 
 ## Возможности
@@ -214,13 +214,13 @@ poetry run mypy                     # статическая типизация
 Публикация новой версии на PyPI автоматизирована через GitHub Actions
 (workflow `.github/workflows/publish.yml`):
 
-1. Поднимите версию в `pyproject.toml` (`version = "0.2.0"`) и закоммитьте
-   изменение, например: `chore: bump version to 0.2.0`.
+1. Поднимите версию в `pyproject.toml` (`version = "0.3.0"`) и закоммитьте
+   изменение, например: `chore: bump version to 0.3.0`.
 2. Создайте и запушьте git-тег, совпадающий с версией:
 
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag v0.3.0
+   git push origin v0.3.0
    ```
 
 3. Workflow соберёт wheel и sdist (`poetry build`) и опубликует их на PyPI.
