@@ -129,6 +129,27 @@ def test_session_flag_enables_memory_without_config(
     assert (tmp_path / ".ember" / "memory" / "cli.json").is_file()
 
 
+DISABLED_MEMORY_SECTION = textwrap.dedent("""\
+    [memory]
+    enabled = false
+    directory = "mem"
+    """)
+
+
+def test_session_flag_overrides_disabled_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Явный ``--session`` включает память даже при ``enabled = false``."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.toml").write_text(DISABLED_MEMORY_SECTION, encoding="utf-8")
+
+    code = main(["run", "--message", "Привет", "--session", "cli"])
+
+    capsys.readouterr()
+    assert code == 0
+    assert (tmp_path / "mem" / "cli.json").is_file(), "флаг сильнее конфигурации"
+
+
 def test_session_flag_overrides_configured_session(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

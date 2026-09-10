@@ -84,6 +84,26 @@ _MEMORY_FACTORIES: dict[str, MemoryFactory] = {
 }
 
 
+def build_memory_store(config: MemoryConfig) -> Memory:
+    """Создаёт хранилище памяти, не глядя на флаг ``enabled``.
+
+    Нужно командам ``ember-agent memory``: они работают с уже сохранёнными
+    сессиями и должны читать/удалять их даже тогда, когда память в конфигурации
+    выключена (``enabled = false``).
+
+    Args:
+        config: Секция ``[memory]`` конфигурации.
+
+    Raises:
+        ConfigError: запрошен незарегистрированный тип хранилища.
+    """
+    factory = _MEMORY_FACTORIES.get(config.type)
+    if factory is None:
+        valid = ", ".join(sorted(_MEMORY_FACTORIES))
+        raise ConfigError(f"Неизвестный тип памяти {config.type!r}; ожидается одно из: {valid}")
+    return factory(config)
+
+
 def build_memory(config: MemoryConfig) -> Memory | None:
     """Создаёт хранилище памяти по конфигурации.
 
@@ -101,12 +121,7 @@ def build_memory(config: MemoryConfig) -> Memory | None:
     """
     if not config.enabled:
         return None
-
-    factory = _MEMORY_FACTORIES.get(config.type)
-    if factory is None:
-        valid = ", ".join(sorted(_MEMORY_FACTORIES))
-        raise ConfigError(f"Неизвестный тип памяти {config.type!r}; ожидается одно из: {valid}")
-    return factory(config)
+    return build_memory_store(config)
 
 
 #: Формат временной части id новой сессии.
