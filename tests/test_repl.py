@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
 from ember import Agent, FunctionTool, MockProvider
-from ember_agent.config import AgentConfig
+from ember.memory import FileMemory
+from ember_agent.config import AgentConfig, MemoryConfig
+from ember_agent.factory import build_agent
 from ember_agent.repl import (
     AGENT_LABEL,
     HELP_TEXT,
@@ -41,12 +44,25 @@ def _mock_agent(system_prompt: str = "Ты тестовый агент.") -> Age
     )
 
 
+def _memory_config(tmp_path: Path, *, session_id: str = "default") -> AgentConfig:
+    """Конфигурация агента с включённой памятью в ``tmp_path``."""
+    return AgentConfig(
+        memory=MemoryConfig(
+            enabled=True,
+            directory=str(tmp_path / "mem"),
+            session_id=session_id,
+        )
+    )
+
+
 class _InterruptingStreamAgent:
     """Фейковый агент, чей ответ прерывается KeyboardInterrupt."""
 
     provider = MockProvider()
     model: str | None = None
     tools: Sequence[Any] | None = None
+    memory: Any = None
+    session_id: str | None = None
 
     def stream_run(self, user_input: str) -> Iterator[str]:
         yield "начало"
@@ -80,6 +96,24 @@ def test_format_greeting_without_model_and_tools() -> None:
 
     assert "инструменты: нет" in text
     assert "модель:" not in text
+
+
+def test_format_greeting_reports_disabled_memory() -> None:
+    text = format_greeting(provider="MockProvider", model=None, tool_names=[])
+
+    assert "память: выключена" in text
+
+
+def test_format_greeting_reports_memory_session() -> None:
+    text = format_greeting(
+        provider="MockProvider",
+        model=None,
+        tool_names=[],
+        session_id="default",
+        memory_directory=".ember/memory",
+    )
+
+    assert "🗂 память: сессия 'default' → .ember/memory" in text
 
 
 def test_help_text_documents_commands() -> None:
@@ -208,6 +242,54 @@ def test_user_prompt_is_not_a_bare_lowercase_you() -> None:
     assert "вы:" not in USER_PROMPT.lower().replace(" ", "")
 
 
+# --- память в диалоге ---------------------------------------------------
+
+
+def test_session_greeting_shows_memory_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with build_agent(_memory_config(tmp_path, session_id="repl")) as agent:
+        code = _session(agent, Console(), _make_input("exit"))
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "🗂 память: сессия 'repl'" in captured.out
+    assert str(tmp_path / "mem") in captured.out
+
+
+def test_session_reset_clears_memory_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = tmp_path / "mem"
+    with build_agent(_memory_config(tmp_path, session_id="repl")) as agent:
+        code = _session(agent, Console(), _make_input("привет", "/reset", "exit"))
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Сессия 'repl' очищена" in captured.out
+    assert FileMemory(directory).load_session("repl") == []
+
+
+def test_session_memory_survives_restart(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _memory_config(tmp_path, session_id="repl")
+
+    with build_agent(config) as first:
+        _session(first, Console(), _make_input("привет", "exit"))
+    capsys.readouterr()
+
+    with build_agent(config) as agent:
+        code = _session(agent, Console(), _make_input("exit"))
+        roles = [message.role for message in agent.messages]
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "🗂 память: сессия 'repl'" in captured.out
+    assert roles[0] == "system"
+    assert "user" in roles, "прошлый диалог должен загрузиться из хранилища"
+
+
 # --- лог вызовов инструментов (_ToolFeed) -------------------------------
 
 
@@ -286,3 +368,15 @@ def test_run_repl_with_default_config(capsys: pytest.CaptureFixture[str]) -> Non
     captured = capsys.readouterr()
     assert code == 0
     assert "Привет! Я мок-провайдер." in captured.out
+
+
+def test_run_repl_with_memory_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = run_repl(
+        _memory_config(tmp_path, session_id="repl"),
+        input_fn=_make_input("привет", "exit"),
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "🗂 память: сессия 'repl'" in captured.out
+    assert FileMemory(tmp_path / "mem").load_session("repl"), "диалог должен сохраниться"

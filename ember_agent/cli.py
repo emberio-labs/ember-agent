@@ -9,10 +9,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from ember_agent import __version__
-from ember_agent.config import DEFAULT_CONFIG_FILE, ConfigError, load_config
+from ember_agent.config import DEFAULT_CONFIG_FILE, AgentConfig, ConfigError, load_config
 from ember_agent.factory import build_agent
 from ember_agent.repl import run_repl
 
@@ -44,7 +45,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--message",
         help="разовый запрос без интерактивного диалога",
     )
+    memory_group = run.add_mutually_exclusive_group()
+    memory_group.add_argument(
+        "--session",
+        metavar="ID",
+        help="включить межсессионную память и продолжить диалог в сессии ID",
+    )
+    memory_group.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="выключить память, даже если она включена в конфигурации",
+    )
     return parser
+
+
+def _apply_memory_overrides(config: AgentConfig, args: argparse.Namespace) -> AgentConfig:
+    """Учесть CLI-флаги памяти: они перекрывают секцию ``[memory]`` из TOML.
+
+    ``--no-memory`` выключает память независимо от конфигурации; ``--session ID``
+    включает её и переключает на указанную сессию (явно выбранная сессия —
+    достаточное намерение пользователя, даже если ``enabled = false``).
+    """
+    memory = config.memory
+    if args.no_memory:
+        memory = replace(memory, enabled=False)
+    elif args.session:
+        memory = replace(memory, enabled=True, session_id=args.session)
+    return replace(config, memory=memory)
 
 
 def _print_error(message: str) -> None:
@@ -53,7 +80,7 @@ def _print_error(message: str) -> None:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     try:
-        config = load_config(Path(args.config))
+        config = _apply_memory_overrides(load_config(Path(args.config)), args)
     except ConfigError as exc:
         _print_error(str(exc))
         return 2

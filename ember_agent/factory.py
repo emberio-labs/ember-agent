@@ -1,7 +1,7 @@
 """Сборка агента ``ember`` из конфигурации ``ember_agent``.
 
-Фабрика скрывает детали библиотеки ``ember``: провайдеров, MCP-клиенты
-и передачу параметров в ``Agent``.
+Фабрика скрывает детали библиотеки ``ember``: провайдеров, MCP-клиенты,
+память и передачу параметров в ``Agent``.
 """
 
 from __future__ import annotations
@@ -11,9 +11,18 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from typing import Any
 
-from ember import Agent, FunctionTool, MCPClient, MockProvider, OpenAIProvider
+from ember import (
+    Agent,
+    FileMemory,
+    FunctionTool,
+    MCPClient,
+    Memory,
+    MockProvider,
+    OpenAIProvider,
+)
 
 from ember_agent.config import (
+    MEMORY_FILE,
     PROVIDER_MOCK,
     PROVIDER_OPENAI,
     TRANSPORT_HTTP,
@@ -21,6 +30,7 @@ from ember_agent.config import (
     AgentConfig,
     ConfigError,
     MCPServerConfig,
+    MemoryConfig,
     ProviderConfig,
 )
 
@@ -28,6 +38,8 @@ from ember_agent.config import (
 type ToolCallHook = Callable[[str, dict[str, Any]], None]
 #: Вызывается после исполнения инструмента: результат (или исключение).
 type ToolResultHook = Callable[[str, Any], None]
+#: Фабрика хранилища памяти: конфигурация → реализация интерфейса ``Memory``.
+type MemoryFactory = Callable[[MemoryConfig], Memory]
 
 
 def build_provider(config: ProviderConfig) -> MockProvider | OpenAIProvider:
@@ -54,6 +66,45 @@ def build_provider(config: ProviderConfig) -> MockProvider | OpenAIProvider:
         return OpenAIProvider(api_key=api_key, **kwargs)
 
     raise ConfigError(f"Неизвестный тип провайдера: {config.type!r}")  # не должно достигаться
+
+
+def _build_file_memory(config: MemoryConfig) -> Memory:
+    """Файловое хранилище ``ember``: JSONL, по файлу на сессию."""
+    return FileMemory(config.directory)
+
+
+#: Реестр известных хранилищ памяти: ключ — значение ``[memory] type``.
+#: Программный код может зарегистрировать здесь свою реализацию ``Memory``
+#: (Redis, SQLite, ... — интерфейс публичный); для CLI значения ограничены
+#: ``config.VALID_MEMORY_TYPES``, чтобы конфиг не мог подсунуть произвольное.
+_MEMORY_FACTORIES: dict[str, MemoryFactory] = {
+    MEMORY_FILE: _build_file_memory,
+}
+
+
+def build_memory(config: MemoryConfig) -> Memory | None:
+    """Создаёт хранилище памяти по конфигурации.
+
+    Возвращает ``None``, если память выключена: тогда агент работает как
+    раньше — ничего не пишет на диск и не подтягивает прошлые сессии.
+    Реализацию выбирает ``config.type`` через реестр ``_MEMORY_FACTORIES``,
+    поэтому ни конфиг, ни вызывающий код не зависят от конкретного класса:
+    ``FileMemory`` — реализация по умолчанию, а не часть контракта.
+
+    Args:
+        config: Секция ``[memory]`` конфигурации.
+
+    Raises:
+        ConfigError: запрошен незарегистрированный тип хранилища.
+    """
+    if not config.enabled:
+        return None
+
+    factory = _MEMORY_FACTORIES.get(config.type)
+    if factory is None:
+        valid = ", ".join(sorted(_MEMORY_FACTORIES))
+        raise ConfigError(f"Неизвестный тип памяти {config.type!r}; ожидается одно из: {valid}")
+    return factory(config)
 
 
 def wrap_tool(
@@ -134,6 +185,12 @@ def build_agent(
     Модель агенту не передаётся: она задана провайдеру (``[provider] model``),
     а агент ``ember`` наследует модель провайдера по умолчанию.
 
+    Если память включена (``[memory] enabled`` или флаг ``--session``), агент
+    получает хранилище (интерфейс ``Memory``, конкретный класс выбирает
+    ``build_memory``) и ``session_id``: при старте он продолжает сохранённую
+    сессию, а после каждого ответа сохраняет диалог. Механизм recall — внутри
+    ``ember``.
+
     Args:
         config: Конфигурация агента.
         on_tool_call: Колбэк перед вызовом инструмента (имя, аргументы).
@@ -142,6 +199,7 @@ def build_agent(
             режиме: каждый инструмент оборачивается прокси через ``wrap_tool``.
     """
     provider = build_provider(config.provider)
+    memory = build_memory(config.memory)
 
     with ExitStack() as stack:
         tools: list[FunctionTool] = []
@@ -159,5 +217,9 @@ def build_agent(
         kwargs: dict[str, Any] = {"provider": provider, "system_prompt": config.system_prompt}
         if tools:
             kwargs["tools"] = tools
+        if memory is not None:
+            # memory и session_id идут только вместе — контракт Agent (ember).
+            kwargs["memory"] = memory
+            kwargs["session_id"] = config.memory.session_id
 
         yield Agent(**kwargs)
