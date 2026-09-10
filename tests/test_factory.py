@@ -1,10 +1,24 @@
-"""Тесты фабрики: сборка агента и обёртка инструментов (mock-first, без сети)."""
+"""Тесты фабрики: сборка агента, память и обёртка инструментов (mock-first)."""
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
+from pathlib import Path
+
 import pytest
-from ember import FunctionTool
-from ember_agent.factory import wrap_tool
+from ember import (
+    ChatRequest,
+    ChatResponse,
+    FunctionTool,
+    Memory,
+    Message,
+    MockProvider,
+)
+from ember.memory import FileMemory
+from ember_agent import factory as factory_module
+from ember_agent.config import AgentConfig, ConfigError, MemoryConfig
+from ember_agent.factory import build_agent, build_memory, resolve_session_id, wrap_tool
 
 
 def _echo_tool() -> FunctionTool:
@@ -19,6 +33,45 @@ def _echo_tool() -> FunctionTool:
         parameters={"type": "object", "properties": {"text": {"type": "string"}}},
         func=echo,
     )
+
+
+class _RecordingProvider(MockProvider):
+    """MockProvider, запоминающий сообщения каждого запроса (для проверки recall)."""
+
+    def __init__(self, response_text: str = "ок") -> None:
+        super().__init__(response_text=response_text)
+        self.requests: list[list[Message]] = []
+
+    def complete(self, request: ChatRequest) -> ChatResponse:
+        self.requests.append(list(request.messages))
+        return super().complete(request)
+
+
+class _StubMemory(Memory):
+    """Свой бэкенд памяти: проверяем, что фабрика не привязана к ``FileMemory``."""
+
+    def __init__(self) -> None:
+        self.sessions: dict[str, list[Message]] = {}
+        self.searches: list[tuple[str, str | None]] = []
+
+    def load_session(self, session_id: str) -> list[Message]:
+        return list(self.sessions.get(session_id, []))
+
+    def save_session(self, session_id: str, messages: Sequence[Message]) -> None:
+        self.sessions[session_id] = list(messages)
+
+    def search(
+        self,
+        query: str,
+        *,
+        exclude_session_id: str | None = None,
+        limit: int = 5,
+    ) -> list[Message]:
+        self.searches.append((query, exclude_session_id))
+        return []
+
+    def delete_session(self, session_id: str) -> None:
+        self.sessions.pop(session_id, None)
 
 
 def test_wrap_tool_without_hooks_returns_original() -> None:
@@ -72,3 +125,197 @@ def test_wrap_tool_logs_exception_and_reraises() -> None:
     name, result = results[0]
     assert name == "boom"
     assert isinstance(result, RuntimeError)
+
+
+# --- память -------------------------------------------------------------
+
+
+def _memory_config(tmp_path: Path, *, session_id: str = "s1") -> AgentConfig:
+    return AgentConfig(
+        memory=MemoryConfig(
+            enabled=True,
+            directory=str(tmp_path / "mem"),
+            session_id=session_id,
+        )
+    )
+
+
+def test_build_memory_disabled_returns_none(tmp_path: Path) -> None:
+    directory = tmp_path / "mem"
+
+    assert build_memory(MemoryConfig(directory=str(directory))) is None
+    assert not directory.exists(), "выключенная память не должна создавать директорию"
+
+
+def test_build_memory_enabled_returns_file_memory(tmp_path: Path) -> None:
+    directory = tmp_path / "mem"
+
+    memory = build_memory(MemoryConfig(enabled=True, directory=str(directory)))
+
+    assert isinstance(memory, FileMemory)
+    assert isinstance(memory, Memory), "возвращается интерфейс, а не конкретный класс"
+    assert memory.directory == directory
+    assert directory.is_dir()
+
+
+def test_build_memory_passes_config_to_registered_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _StubMemory()
+    seen: list[MemoryConfig] = []
+
+    def factory(config: MemoryConfig) -> Memory:
+        seen.append(config)
+        return stub
+
+    monkeypatch.setitem(factory_module._MEMORY_FACTORIES, "stub", factory)
+    config = MemoryConfig(enabled=True, type="stub", session_id="custom")
+
+    assert build_memory(config) is stub
+    assert seen == [config], "фабрика получает всю секцию [memory]"
+
+
+def test_build_memory_unknown_type_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = MemoryConfig(enabled=True, type="redis")
+
+    with pytest.raises(ConfigError, match="тип памяти"):
+        build_memory(config)
+
+
+def test_build_agent_without_memory_leaves_agent_plain() -> None:
+    with build_agent(AgentConfig()) as agent:
+        assert agent.memory is None
+        assert agent.session_id is None
+
+
+def test_build_agent_wires_memory_and_session(tmp_path: Path) -> None:
+    with build_agent(_memory_config(tmp_path)) as agent:
+        assert isinstance(agent.memory, FileMemory)
+        assert agent.session_id == "s1"
+
+
+def test_build_agent_wires_custom_memory_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _StubMemory()
+    monkeypatch.setitem(factory_module._MEMORY_FACTORIES, "stub", lambda config: stub)
+    config = AgentConfig(
+        memory=MemoryConfig(enabled=True, type="stub", session_id="custom"),
+    )
+
+    with build_agent(config) as agent:
+        agent.run("привет")
+        assert agent.memory is stub
+        assert agent.session_id == "custom"
+
+    assert stub.sessions["custom"], "диалог должен уйти в пользовательский бэкенд"
+
+
+def test_memory_persists_dialog_between_runs(tmp_path: Path) -> None:
+    config = _memory_config(tmp_path)
+
+    with build_agent(config) as agent:
+        agent.run("Запомни: кодовое слово — сирень")
+
+    with build_agent(config) as agent:
+        roles = [message.role for message in agent.messages]
+
+    assert roles[0] == "system"
+    assert "user" in roles
+    assert "assistant" in roles
+    assert any("сирень" in message.content for message in agent.messages)
+
+
+def test_memory_recall_adds_fragments_from_other_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "mem"
+    FileMemory(directory).save_session(
+        "old", [Message(role="user", content="Любимый цвет пользователя — синий")]
+    )
+    provider = _RecordingProvider()
+    monkeypatch.setattr(factory_module, "build_provider", lambda _config: provider)
+
+    with build_agent(_memory_config(tmp_path, session_id="new")) as agent:
+        agent.run("Какой у меня любимый цвет?")
+
+    system_messages = [
+        message.content for message in provider.requests[0] if message.role == "system"
+    ]
+    assert any("синий" in content for content in system_messages)
+
+
+def test_memory_recall_skips_current_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _StubMemory()
+    monkeypatch.setitem(factory_module._MEMORY_FACTORIES, "stub", lambda config: stub)
+    config = AgentConfig(
+        memory=MemoryConfig(enabled=True, type="stub", session_id="current"),
+    )
+
+    with build_agent(config) as agent:
+        agent.run("Какой у меня любимый цвет?")
+
+    assert stub.searches, "агент должен спросить прошлые сессии"
+    assert {session for _, session in stub.searches} == {"current"}
+
+
+# --- выбор сессии: явная или новая ---------------------------------------
+
+
+def test_resolve_session_id_disabled_is_none(tmp_path: Path) -> None:
+    assert resolve_session_id(MemoryConfig(directory=str(tmp_path))) is None
+
+
+def test_resolve_session_id_keeps_explicit_session() -> None:
+    config = MemoryConfig(enabled=True, session_id="project")
+
+    assert resolve_session_id(config) == "project"
+
+
+def test_resolve_session_id_generates_unique_ids() -> None:
+    config = MemoryConfig(enabled=True)
+
+    first, second = resolve_session_id(config), resolve_session_id(config)
+
+    assert first is not None
+    assert second is not None
+    assert first != second, "два запуска не должны попадать в одну сессию"
+    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", first), first
+
+
+def test_build_agent_generates_session_id_when_unset(tmp_path: Path) -> None:
+    directory = tmp_path / "mem"
+    config = AgentConfig(memory=MemoryConfig(enabled=True, directory=str(directory)))
+
+    with build_agent(config) as agent:
+        session_id = agent.session_id
+        agent.run("Запомни: кодовое слово — сирень")
+
+    assert session_id is not None
+    assert session_id != config.memory.session_id
+    saved = FileMemory(directory).load_session(session_id)
+    assert saved, "диалог должен сохраниться в сессии, id которой выбрал агент"
+
+
+def test_auto_session_starts_new_dialog_each_run(tmp_path: Path) -> None:
+    directory = tmp_path / "mem"
+    config = AgentConfig(memory=MemoryConfig(enabled=True, directory=str(directory)))
+
+    with build_agent(config) as first:
+        first_id = first.session_id
+        first.run("Первое сообщение")
+
+    with build_agent(config) as second:
+        second_id = second.session_id
+        assert second_id != first_id, "каждый запуск получает свой id сессии"
+        roles = [message.role for message in second.messages]
+        assert roles == ["system"], "новый запуск начинает диалог с нуля"
+        second.run("Второе сообщение")
+
+    assert first_id is not None
+    assert second_id is not None
+    first_file = (directory / f"{first_id}.json").read_text(encoding="utf-8")
+    second_file = (directory / f"{second_id}.json").read_text(encoding="utf-8")
+    assert "Первое сообщение" in first_file
+    assert "Первое сообщение" not in second_file, "прошлый диалог не подмешивается в новый"
+    assert "Второе сообщение" in second_file

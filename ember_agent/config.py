@@ -16,6 +16,9 @@ DEFAULT_CONFIG_FILE = "config.toml"
 #: Промпт, используемый, если в конфигурации ничего не задано.
 DEFAULT_SYSTEM_PROMPT = "Ты полезный и краткий помощник."
 
+#: Директория памяти по умолчанию (относительный путь — от текущей рабочей директории).
+DEFAULT_MEMORY_DIRECTORY = ".ember/memory"
+
 PROVIDER_MOCK = "mock"
 PROVIDER_OPENAI = "openai"
 VALID_PROVIDERS: frozenset[str] = frozenset({PROVIDER_MOCK, PROVIDER_OPENAI})
@@ -23,6 +26,11 @@ VALID_PROVIDERS: frozenset[str] = frozenset({PROVIDER_MOCK, PROVIDER_OPENAI})
 TRANSPORT_STDIO = "stdio"
 TRANSPORT_HTTP = "http"
 VALID_TRANSPORTS: frozenset[str] = frozenset({TRANSPORT_STDIO, TRANSPORT_HTTP})
+
+#: Единственное хранилище памяти, которое умеет ``ember``: файловое (JSONL).
+MEMORY_FILE = "file"
+#: Известные типы хранилищ памяти для ``[memory] type``.
+VALID_MEMORY_TYPES: frozenset[str] = frozenset({MEMORY_FILE})
 
 
 class ConfigError(ValueError):
@@ -42,6 +50,15 @@ def _optional_str(data: dict[str, Any], key: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise ConfigError(f"Поле '{key}' должно быть строкой, получено {type(value).__name__}")
+    return value
+
+
+def _require_bool(data: dict[str, Any], key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"Поле '{key}' должно быть булевым (true/false), получено {type(value).__name__}"
+        )
     return value
 
 
@@ -94,12 +111,39 @@ class ProviderConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Настройки межсессионной памяти (выбор хранилища и сессии).
+
+    Механизм хранения и recall — зона библиотеки ``ember``; здесь только
+    выбор хранилища (``type``) и сессии. При ``enabled = false`` агент не
+    пишет на диск и не выполняет recall — память включается явно.
+    """
+
+    #: Включать ли память. По умолчанию выключена: без явного согласия
+    #: (``enabled = true`` в TOML или флаг ``--session``) ничего не пишем.
+    enabled: bool = False
+    #: Тип хранилища: пока только "file" (``ember.FileMemory``). Тип выбирает
+    #: реализацию в ``factory._MEMORY_FACTORIES``, поэтому конфиг не зависит
+    #: от конкретного класса хранилища.
+    type: str = MEMORY_FILE
+    #: Директория с файлами сессий (по файлу ``<session_id>.json`` на сессию).
+    #: Относительный путь — от текущей рабочей директории.
+    directory: str = DEFAULT_MEMORY_DIRECTORY
+    #: Идентификатор сессии. ``None`` (по умолчанию) — каждый запуск начинает
+    #: новый диалог с сгенерированным id; прошлые диалоги при этом не теряются —
+    #: их подмешивает recall. Явное значение (например, ``"my-project"``)
+    #: продолжает ту же сессию: запуски с одним ``session_id`` пишут в один диалог.
+    session_id: str | None = None
+
+
+@dataclass
 class AgentConfig:
     """Полная конфигурация агента после чтения TOML-файла."""
 
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     mcp_servers: list[MCPServerConfig] = field(default_factory=list)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
@@ -115,6 +159,7 @@ class AgentConfig:
             system_prompt=_require_str(agent_section, "system_prompt", DEFAULT_SYSTEM_PROMPT),
             provider=_parse_provider(provider_section),
             mcp_servers=_parse_mcp_servers(data.get("mcp")),
+            memory=_parse_memory(data.get("memory")),
         )
 
 
@@ -130,6 +175,33 @@ def _parse_provider(data: dict[str, Any]) -> ProviderConfig:
         model=_optional_str(data, "model"),
         api_key_env=_require_str(data, "api_key_env", "OPENAI_API_KEY"),
         base_url=_optional_str(data, "base_url"),
+    )
+
+
+def _parse_memory(raw: Any) -> MemoryConfig:
+    if raw is None:
+        return MemoryConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("Секция '[memory]' должна быть таблицей")
+
+    memory_type = _require_str(raw, "type", MEMORY_FILE)
+    if memory_type not in VALID_MEMORY_TYPES:
+        valid = ", ".join(sorted(VALID_MEMORY_TYPES))
+        raise ConfigError(f"Неизвестный тип памяти {memory_type!r}; ожидается одно из: {valid}")
+
+    directory = _require_str(raw, "directory", DEFAULT_MEMORY_DIRECTORY)
+    if not directory.strip():
+        raise ConfigError("Поле '[memory].directory' не может быть пустым")
+
+    session_id = _optional_str(raw, "session_id")
+    if session_id is not None and not session_id.strip():
+        raise ConfigError("Поле '[memory].session_id' не может быть пустым")
+
+    return MemoryConfig(
+        enabled=_require_bool(raw, "enabled", False),
+        type=memory_type,
+        directory=directory,
+        session_id=session_id,
     )
 
 

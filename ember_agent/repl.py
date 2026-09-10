@@ -3,9 +3,9 @@
 Собирает в одном месте UX диалога с агентом, который раньше был
 «минимальным каркасом» в ``cli.py``:
 
-- баннер приветствия (rich-панель): версия, провайдер, модель, инструменты;
+- баннер приветствия (rich-панель): версия, провайдер, модель, инструменты, память;
 - диалог в виде чата: ответы агента с подписью, приглашение «Ваш ответ»;
-- команды сессии ``/help``, ``/reset`` (сброс через ``Agent.reset()``);
+- команды сессии ``/help``, ``/reset`` (сброс истории через ``Agent.reset()``);
 - markdown-рендер ответов (rich) с потоковой печатью там, где нет тулов;
 - анимированный индикатор «думаю…» (rich ``Status``) на время ответа агента;
 - цветной лог вызовов инструментов: имя тула, аргументы и результат;
@@ -43,7 +43,7 @@ USER_PROMPT = "\n[bold cyan]Ваш ответ:[/bold cyan] "
 HELP_TEXT = """\
 Команды сессии:
   /help    — показать эту справку
-  /reset   — начать новый диалог (сбросить историю)
+  /reset   — начать новый диалог (очистить историю и текущую сессию памяти)
 
 Выход: exit, quit, выход. Или Ctrl+D; Ctrl+C дважды — тоже выход.
 """
@@ -67,6 +67,8 @@ class ReplAgent(Protocol):
     provider: Any
     model: str | None
     tools: Sequence[Any] | None
+    memory: Any
+    session_id: str | None
 
     def run(self, user_input: str) -> str: ...
     def stream_run(self, user_input: str) -> Iterator[str]: ...
@@ -82,11 +84,14 @@ def format_greeting(
     provider: str,
     model: str | None,
     tool_names: Sequence[str],
+    session_id: str | None = None,
+    memory_directory: str | None = None,
 ) -> str:
     """Собрать текст баннера приветствия (тело rich-панели).
 
     Заголовок панели с версией добавляется при печати в ``_session`` —
-    здесь только контекст сессии и подсказка.
+    здесь только контекст сессии и подсказка. Про память пишем всегда:
+    выключенная — это тоже полезно знать до первого запроса.
     """
     lines = [f"🔌 провайдер: {provider}"]
     if model:
@@ -95,6 +100,11 @@ def format_greeting(
         lines.append(f"🧰 инструменты ({len(tool_names)}): {', '.join(tool_names)}")
     else:
         lines.append("🧰 инструменты: нет")
+    if session_id and memory_directory:
+        lines.append(f"🗂 память: сессия {session_id!r} → {memory_directory}")
+        lines.append(f"↻ продолжить диалог: ember-agent run --session {session_id}")
+    else:
+        lines.append("🗂 память: выключена")
     lines.extend(["", "💬 Введите сообщение или наберите /help."])
     return "\n".join(lines)
 
@@ -105,6 +115,19 @@ def _agent_context(agent: ReplAgent) -> tuple[str, str | None, list[str]]:
     model = agent.model or getattr(agent.provider, "model", None)
     names = [tool.name for tool in (agent.tools or [])]
     return provider_name, model, names
+
+
+def _memory_directory(agent: ReplAgent) -> str | None:
+    """Директория хранилища памяти или ``None``, если память выключена.
+
+    У ``FileMemory`` есть атрибут ``directory``; для произвольной реализации
+    ``Memory`` показываем имя класса — лишь бы пользователь понимал, куда пишем.
+    """
+    memory = agent.memory
+    if memory is None:
+        return None
+    directory = getattr(memory, "directory", None)
+    return str(directory) if directory is not None else type(memory).__name__
 
 
 def _preview_result(text: str) -> str:
@@ -333,9 +356,17 @@ def _print_greeting(
     provider: str,
     model: str | None,
     tool_names: Sequence[str],
+    session_id: str | None = None,
+    memory_directory: str | None = None,
 ) -> None:
     """Напечатать баннер приветствия: rich-панель с версией и контекстом."""
-    body = format_greeting(provider=provider, model=model, tool_names=tool_names)
+    body = format_greeting(
+        provider=provider,
+        model=model,
+        tool_names=tool_names,
+        session_id=session_id,
+        memory_directory=memory_directory,
+    )
     console.print(
         Panel(
             body,
@@ -346,6 +377,14 @@ def _print_greeting(
     )
 
 
+def _reset_message(agent: ReplAgent) -> str:
+    """Текст подтверждения ``/reset``: с памятью уточняем, что сессия очищена."""
+    message = "История сброшена: начинаем новый диалог."
+    if agent.memory is not None and agent.session_id:
+        return f"{message} Сессия {agent.session_id!r} очищена в хранилище."
+    return message
+
+
 def _session(
     agent: ReplAgent,
     console: Console,
@@ -354,7 +393,14 @@ def _session(
 ) -> int:
     """Цикл диалога: ввод строк, команды, ответы агента. Код выхода 0."""
     provider, model, tool_names = _agent_context(agent)
-    _print_greeting(console, provider=provider, model=model, tool_names=tool_names)
+    _print_greeting(
+        console,
+        provider=provider,
+        model=model,
+        tool_names=tool_names,
+        session_id=agent.session_id,
+        memory_directory=_memory_directory(agent),
+    )
 
     interrupted = False
     while True:
@@ -383,7 +429,7 @@ def _session(
                 console.print(HELP_TEXT)
             elif command == "/reset":
                 agent.reset()
-                console.print(Text("История сброшена: начинаем новый диалог."))
+                console.print(Text(_reset_message(agent)))
             else:
                 console.print(Text(f"Неизвестная команда: {line}. Наберите /help."))
             continue
@@ -407,6 +453,7 @@ def run_repl(
     Создаёт агента через ``factory.build_agent`` с хуками, которые пишут
     события вызовов инструментов в буфер ``_ToolFeed``: в терминале их
     печатает цикл анимации, в перенаправленном выводе — сразу после ответа.
+    Если в конфигурации включена память, диалог продолжает сессию с диска.
     Возвращает код выхода 0.
 
     Args:
